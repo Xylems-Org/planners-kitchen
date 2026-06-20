@@ -1,5 +1,11 @@
 <template>
   <div>
+    <!-- Post-cooking pantry check dialog -->
+    <RecipeCookingDoneDialog
+      v-model="cookingDoneDialog"
+      :recipe-slug="props.recipe.slug || ''"
+      :ingredients="cookingDoneIngredients"
+    />
     <div>
       <BaseDialog
         v-model="madeThisDialog"
@@ -149,6 +155,7 @@ import { alert } from "~/composables/use-toast";
 import { useHouseholdSelf } from "~/composables/use-households";
 import type { Recipe, RecipeTimelineEventIn, RecipeTimelineEventOut } from "~/lib/api/types/recipe";
 import type { VForm } from "~/types/auto-forms";
+import RecipeCookingDoneDialog from "./RecipeCookingDoneDialog.vue";
 
 const props = defineProps<{ recipe: Recipe }>();
 const emit = defineEmits<{
@@ -156,6 +163,18 @@ const emit = defineEmits<{
 }>();
 
 const madeThisDialog = ref(false);
+const cookingDoneDialog = ref(false);
+const cookingDoneIngredients = computed(() => {
+  return (props.recipe.recipeIngredient || [])
+    .filter(ing => ing.food?.id)
+    .map(ing => ({
+      referenceId: ing.referenceId || "",
+      foodId: ing.food?.id || null,
+      foodName: ing.food?.name || ing.note || "",
+      quantity: ing.quantity,
+      unit: ing.unit?.name,
+    }));
+});
 const userApi = useUserApi();
 const { household } = useHouseholdSelf();
 const i18n = useI18n();
@@ -347,5 +366,10 @@ async function createTimelineEvent() {
 
   resetMadeThisForm();
   emit("eventCreated", newEvent);
+
+  // Trigger the post-cooking pantry check if there are food ingredients
+  if (cookingDoneIngredients.value.length > 0) {
+    cookingDoneDialog.value = true;
+  }
 }
 </script>
