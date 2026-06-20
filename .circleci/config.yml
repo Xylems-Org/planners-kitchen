@@ -1,0 +1,153 @@
+version: 2.1
+
+executors:
+  custom-runner:
+    docker:
+      - image: cimg/base:current
+    resource_class: xylems-org/custom-runner
+
+commands:
+  robust-checkout:
+    steps:
+      - run:
+          name: Load CI secrets from Infisical (fallback when CircleCI env unset)
+          command: |
+            K3S=/host/usr/local/bin/k3s
+            if [ -x "$K3S" ]; then
+              for v in GHCR_USERNAME GHCR_TOKEN GITOPS_DEPLOY_KEY; do
+                if [ -z "${!v:-}" ]; then
+                  val=$(KUBECONFIG=/etc/rancher/k3s/k3s.yaml "$K3S" kubectl get secret circleci-ci-secrets \
+                        -n circleci-runner -o jsonpath="{.data.$v}" 2>/dev/null | base64 -d 2>/dev/null || true)
+                  if [ -n "$val" ]; then export "$v=$val"; printf 'export %s=%q\n' "$v" "$val" >> "$BASH_ENV"; fi
+                fi
+              done
+            fi
+      - run:
+          name: Checkout (manual, with HTTPS fallback)
+          command: |
+            set -e
+            REPO_URL=${CIRCLE_REPOSITORY_URL:-git@github.com:${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}.git}
+            HTTPS_REPO_URL="https://github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}.git"
+            KEY=/root/.ssh/id_rsa
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            cat > /root/.ssh/config \<<'CFG'
+            Host github.com
+              ConnectTimeout 5
+              ConnectionAttempts 4
+              ServerAliveInterval 10
+              ServerAliveCountMax 2
+              StrictHostKeyChecking accept-new
+              IdentitiesOnly yes
+              UserKnownHostsFile ~/.ssh/known_hosts
+            CFG
+            chmod 600 /root/.ssh/config
+            ssh-keyscan -H -t rsa,ecdsa,ed25519 github.com 2>/dev/null >> /root/.ssh/known_hosts || true
+            if [ ! -f "$KEY" ] && [ -n "${CHECKOUT_KEY:-}" ]; then
+              printf '%s' "$CHECKOUT_KEY" > "$KEY"
+              chmod 600 "$KEY"
+            fi
+            if [ -n "${GHCR_TOKEN:-}" ] && [ -n "${GHCR_USERNAME:-}" ]; then
+              git config --global credential.helper store
+              printf 'https://%s:%s@github.com\n' "$GHCR_USERNAME" "$GHCR_TOKEN" > ~/.git-credentials
+              chmod 600 ~/.git-credentials
+            fi
+            for attempt in 1 2 3 4 5; do
+              echo "Clone attempt $attempt of 5"
+              rm -rf .git ..?* .[!.]* * 2>/dev/null || true
+              if [ -f "$KEY" ]; then
+                export GIT_SSH_COMMAND="ssh -i $KEY -F /root/.ssh/config"
+                CLONE_URL="$REPO_URL"
+              elif [ -n "${GHCR_TOKEN:-}" ] && [ -n "${GHCR_USERNAME:-}" ]; then
+                unset GIT_SSH_COMMAND
+                CLONE_URL="$HTTPS_REPO_URL"
+              else
+                echo "No SSH checkout key or GHCR token is available for checkout."
+                exit 1
+              fi
+              if git clone --depth 1 --filter=blob:none "$CLONE_URL" .; then
+                git fetch --depth 1 origin "$CIRCLE_SHA1" || true
+                git checkout -B "${CIRCLE_BRANCH:-mealie-next}" "$CIRCLE_SHA1"
+                exit 0
+              fi
+              sleep $((attempt * 5))
+            done
+            exit 1
+
+  setup-local-docker:
+    steps:
+      - run:
+          name: Verify local Docker access
+          command: |
+            DOCKER_CONFIG=/mnt/user/App-Storage/circleci-cache/docker-config
+            mkdir -p "$DOCKER_CONFIG"
+            chmod -R a+rwX "$DOCKER_CONFIG" || true
+            echo "export DOCKER_CONFIG=$DOCKER_CONFIG" >> "$BASH_ENV"
+            export DOCKER_CONFIG
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "ERROR: Docker CLI is not available in the job image."
+              exit 1
+            fi
+            if docker version >/dev/null 2>&1; then
+              echo 'export DOCKER="docker"' >> "$BASH_ENV"
+              docker version
+            elif command -v sudo >/dev/null 2>&1 && sudo docker version >/dev/null 2>&1; then
+              echo 'export DOCKER="sudo docker"' >> "$BASH_ENV"
+              sudo docker version
+            else
+              echo "ERROR: Docker CLI is available, but this job cannot access /var/run/docker.sock."
+              ls -l /var/run/docker.sock || true
+              id
+              exit 1
+            fi
+
+workflows:
+  build-nightly:
+    jobs:
+      - build-and-push:
+          filters:
+            branches:
+              only: mealie-next
+
+jobs:
+  build-and-push:
+    executor: custom-runner
+    steps:
+      - robust-checkout
+      - setup-local-docker
+      - run:
+          name: Log in to GHCR
+          command: echo "$GHCR_TOKEN" | ${DOCKER:-docker} login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+      - run:
+          name: Build and push planners-kitchen:nightly
+          command: |
+            IMAGE="ghcr.io/xylems-org/planners-kitchen"
+            CACHE_DIR="/mnt/user/App-Storage/circleci-cache/buildx/planners-kitchen"
+            mkdir -p "$CACHE_DIR"
+            rm -rf "${CACHE_DIR}.next" || sudo rm -rf "${CACHE_DIR}.next"
+            ${DOCKER:-docker} buildx create --use --name planners-builder --driver docker-container || \
+              ${DOCKER:-docker} buildx use planners-builder
+            ${DOCKER:-docker} buildx build \
+              --platform linux/amd64 \
+              --file docker/Dockerfile \
+              --cache-from "type=local,src=${CACHE_DIR}" \
+              --cache-from "type=registry,ref=${IMAGE}:nightly" \
+              --cache-to "type=local,dest=${CACHE_DIR}.next,mode=max" \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              --tag "${IMAGE}:nightly" \
+              --tag "${IMAGE}:${CIRCLE_SHA1:0:7}" \
+              --push \
+              .
+            rm -rf "$CACHE_DIR" || sudo rm -rf "$CACHE_DIR"
+            mv "${CACHE_DIR}.next" "$CACHE_DIR"
+      - run:
+          name: Update image tag in GitOps repo
+          command: |
+            git clone https://${GHCR_USERNAME}:${GHCR_TOKEN}@github.com/Xylems-Org/homelab-gitops.git /tmp/homelab-gitops
+            cd /tmp/homelab-gitops
+            yq -i ".spec.template.spec.containers[0].image = \"ghcr.io/xylems-org/planners-kitchen:${CIRCLE_SHA1:0:7}\"" \
+              services/planning/mealie-deployment.yaml
+            git config user.email "circleci@xylems.dev"
+            git config user.name "CircleCI"
+            git add services/planning/mealie-deployment.yaml
+            git diff --staged --quiet || git commit -m "chore: update planners-kitchen image to ${CIRCLE_SHA1:0:7} [skip ci]"
+            git push

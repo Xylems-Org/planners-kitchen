@@ -1,0 +1,56 @@
+services:
+  planners-kitchen:
+    container_name: planners-kitchen
+    image: planners-kitchen:local
+    build:
+      context: ../
+      target: production
+      dockerfile: ./docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pk-data:/app/data/
+    ports:
+      - "9091:9000"
+    environment:
+      ALLOW_SIGNUP: "true"
+      LOG_LEVEL: "DEBUG"
+
+      DB_ENGINE: postgres
+      POSTGRES_USER: mealie
+      POSTGRES_PASSWORD: mealie
+      POSTGRES_SERVER: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: mealie
+
+      # Sage/Natural Green Theme
+      THEME_LIGHT_PRIMARY: "#558B2F"
+      THEME_LIGHT_ACCENT: "#8BC34A"
+      THEME_LIGHT_SECONDARY: "#4A7C59"
+      THEME_DARK_PRIMARY: "#7CB342"
+      THEME_DARK_ACCENT: "#AED581"
+      THEME_DARK_SECONDARY: "#66BB6A"
+
+  postgres:
+    container_name: planners-kitchen-postgres
+    image: postgres:16
+    restart: unless-stopped
+    volumes:
+      - pk-pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: mealie
+      POSTGRES_PASSWORD: mealie
+      POSTGRES_DB: mealie
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mealie -d mealie"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pk-data:
+    driver: local
+  pk-pgdata:
+    driver: local

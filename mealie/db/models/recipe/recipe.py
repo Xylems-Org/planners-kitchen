@@ -178,6 +178,12 @@ class RecipeModel(SqlAlchemyBase, BaseMixins):
         },
     )
 
+    # Fork lineage
+    parent_recipe_id: Mapped[GUID | None] = mapped_column(
+        GUID, sa.ForeignKey("recipes.id"), nullable=True, index=True
+    )
+    fork_note: Mapped[str | None] = mapped_column(sa.String, nullable=True)
+
     # Deprecated
     recipeCuisine: Mapped[str | None] = mapped_column(sa.String)
     is_ocr_recipe: Mapped[bool | None] = mapped_column(sa.Boolean, default=False)
