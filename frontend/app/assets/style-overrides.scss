@@ -5,3 +5,35 @@
 .v-tab {
   text-transform: none !important;
 }
+
+/* === Planner's Kitchen UI Modernization === */
+
+/* Rounded cards */
+.v-card {
+  border-radius: 12px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
+  transition: box-shadow 0.2s ease, transform 0.2s ease !important;
+}
+
+/* Hover lift for recipe cards */
+.v-card.on-hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15) !important;
+  transform: translateY(-3px);
+}
+
+/* Pill-style primary action buttons */
+.v-btn--variant-elevated,
+.v-btn--variant-flat {
+  border-radius: 24px !important;
+}
+
+/* Recipe card title weight */
+.recipe-card-title {
+  font-weight: 600 !important;
+}
+
+/* Section dividers for ingredient groups */
+.ingredient-section-divider {
+  border-top: 2px solid rgb(var(--v-theme-primary), 0.2) !important;
+  margin: 8px 0 !important;
+}
