@@ -19,33 +19,42 @@ depends_on: str | tuple[str, ...] | None = None
 
 
 def upgrade():
-    op.create_table(
-        "pantry_items",
-        sa.Column("id", mealie.db.migration_types.GUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=True),
-        sa.Column("update_at", sa.DateTime(), nullable=True),
-        sa.Column("household_id", mealie.db.migration_types.GUID(), nullable=False),
-        sa.Column("group_id", mealie.db.migration_types.GUID(), nullable=False),
-        sa.Column("food_id", mealie.db.migration_types.GUID(), nullable=True),
-        sa.Column("name", sa.String(), nullable=False),
-        sa.Column("location", sa.String(), nullable=True),
-        sa.Column("category", sa.String(), nullable=True),
-        sa.Column("quantity", sa.Float(), nullable=True),
-        sa.Column("unit", sa.String(), nullable=True),
-        sa.Column("notes", sa.String(), nullable=True),
-        sa.Column("is_low", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("is_out", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("last_updated", sa.DateTime(), nullable=False),
-        sa.ForeignKeyConstraint(["food_id"], ["ingredient_foods.id"]),
-        sa.ForeignKeyConstraint(["group_id"], ["groups.id"]),
-        sa.ForeignKeyConstraint(["household_id"], ["households.id"]),
-        sa.PrimaryKeyConstraint("id"),
-    )
+    # Idempotent: skip creation if the original planners-kitchen build already
+    # created this table before the v3.19.2 rebuild.
+    if not sa.inspect(op.get_bind()).has_table("pantry_items"):
+        op.create_table(
+            "pantry_items",
+            sa.Column("id", mealie.db.migration_types.GUID(), nullable=False),
+            sa.Column("created_at", sa.DateTime(), nullable=True),
+            sa.Column("update_at", sa.DateTime(), nullable=True),
+            sa.Column("household_id", mealie.db.migration_types.GUID(), nullable=False),
+            sa.Column("group_id", mealie.db.migration_types.GUID(), nullable=False),
+            sa.Column("food_id", mealie.db.migration_types.GUID(), nullable=True),
+            sa.Column("name", sa.String(), nullable=False),
+            sa.Column("location", sa.String(), nullable=True),
+            sa.Column("category", sa.String(), nullable=True),
+            sa.Column("quantity", sa.Float(), nullable=True),
+            sa.Column("unit", sa.String(), nullable=True),
+            sa.Column("notes", sa.String(), nullable=True),
+            sa.Column("is_low", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("is_out", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("last_updated", sa.DateTime(), nullable=False),
+            sa.ForeignKeyConstraint(["food_id"], ["ingredient_foods.id"]),
+            sa.ForeignKeyConstraint(["group_id"], ["groups.id"]),
+            sa.ForeignKeyConstraint(["household_id"], ["households.id"]),
+            sa.PrimaryKeyConstraint("id"),
+        )
+
+    existing = {i["name"] for i in sa.inspect(op.get_bind()).get_indexes("pantry_items")}
     with op.batch_alter_table("pantry_items", schema=None) as batch_op:
-        batch_op.create_index(batch_op.f("ix_pantry_items_household_id"), ["household_id"], unique=False)
-        batch_op.create_index(batch_op.f("ix_pantry_items_group_id"), ["group_id"], unique=False)
-        batch_op.create_index(batch_op.f("ix_pantry_items_food_id"), ["food_id"], unique=False)
-        batch_op.create_index(batch_op.f("ix_pantry_items_location"), ["location"], unique=False)
+        for name, col in (
+            ("ix_pantry_items_household_id", "household_id"),
+            ("ix_pantry_items_group_id", "group_id"),
+            ("ix_pantry_items_food_id", "food_id"),
+            ("ix_pantry_items_location", "location"),
+        ):
+            if name not in existing:
+                batch_op.create_index(batch_op.f(name), [col], unique=False)
 
 
 def downgrade():
