@@ -100,6 +100,65 @@ commands:
               exit 1
             fi
 
+  security-scan:
+    parameters:
+      images:
+        type: string          # space-separated GHCR repo paths (no tag)
+      gitleaks_allow:
+        type: string          # comma-separated allowlist path regexes
+        default: ""
+    steps:
+      - run:
+          name: "Security scan — secrets (gitleaks) + vulns (trivy), fail on CRITICAL, notify Slack"
+          command: |
+            set +e
+            CACHE=/mnt/user/App-Storage/circleci-cache
+            TOOLS="$CACHE/security-tools"; mkdir -p "$TOOLS"; export PATH="$TOOLS:$PATH"
+            [ -x "$TOOLS/gitleaks" ] || curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar -xz -C "$TOOLS" gitleaks
+            [ -x "$TOOLS/trivy" ]    || curl -sSL https://github.com/aquasecurity/trivy/releases/download/v0.70.0/trivy_0.70.0_Linux-64bit.tar.gz | tar -xz -C "$TOOLS" trivy
+            # ---- secrets (source tree) ----
+            ALLOW="<< parameters.gitleaks_allow >>"
+            {
+              echo 'title = "ci secret scan"'
+              echo '[extend]'
+              echo 'useDefault = true'
+              if [ -n "$ALLOW" ]; then
+                echo '[allowlist]'
+                echo 'paths = ['
+                IFS=','; for p in $ALLOW; do printf '  "%s",\n' "$p"; done; unset IFS
+                echo ']'
+              fi
+            } > /tmp/gl.toml
+            "$TOOLS/gitleaks" detect --source . --no-git --config /tmp/gl.toml --report-format json --report-path /tmp/gl.json --exit-code 0 >/dev/null 2>&1
+            SECRETS=$(jq 'length' /tmp/gl.json 2>/dev/null || echo 0)
+            # ---- vulns (each built image) ----
+            export TRIVY_CACHE_DIR="$CACHE/trivy"; mkdir -p "$TRIVY_CACHE_DIR"
+            export TRIVY_USERNAME="$GHCR_USERNAME"; export TRIVY_PASSWORD="$GHCR_TOKEN"
+            CRIT=0; HIGH=0; DETAIL=""
+            for repo in << parameters.images >>; do
+              IMG="ghcr.io/xylems-org/${repo}:${CIRCLE_SHA1:0:7}"
+              if ! ${DOCKER:-docker} buildx imagetools inspect "$IMG" >/dev/null 2>&1; then
+                DETAIL="${DETAIL}\n• ${repo}: not built this run — skipped"; continue
+              fi
+              "$TOOLS/trivy" image --scanners vuln --severity HIGH,CRITICAL --format json -o /tmp/tv.json --quiet "$IMG" 2>/dev/null
+              c=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length' /tmp/tv.json 2>/dev/null || echo 0)
+              h=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="HIGH")]|length'     /tmp/tv.json 2>/dev/null || echo 0)
+              CRIT=$((CRIT + c)); HIGH=$((HIGH + h))
+              DETAIL="${DETAIL}\n• ${repo}: ${c} CRITICAL, ${h} HIGH"
+            done
+            # ---- verdict + Slack (always reported) ----
+            FAIL=0; STATUS=":white_check_mark: passed"; COLOR="#22c55e"
+            [ "${CRIT:-0}" -gt 0 ]    && { FAIL=1; STATUS=":x: FAILED — critical vulnerabilities"; COLOR="#ef4444"; }
+            [ "${SECRETS:-0}" -gt 0 ] && { FAIL=1; STATUS=":x: FAILED — secrets detected";        COLOR="#ef4444"; }
+            if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+              TEXT="*${CIRCLE_PROJECT_REPONAME}* image security scan — ${STATUS}\nSecrets: ${SECRETS}  |  CRITICAL: ${CRIT}  |  HIGH: ${HIGH}${DETAIL}\n<${CIRCLE_BUILD_URL:-}|Build> · \`${CIRCLE_SHA1:0:7}\`"
+              payload=$(jq -n --arg t "$TEXT" --arg c "$COLOR" '{attachments:[{color:$c,title:"CI Security Scan",text:$t,mrkdwn_in:["text"]}]}')
+              curl -sS -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 || true
+            fi
+            echo "RESULT secrets=$SECRETS critical=$CRIT high=$HIGH"
+            [ "$FAIL" -eq 1 ] && { echo "Blocking deploy: critical vulnerabilities or secrets found."; exit 1; }
+            exit 0
+
 workflows:
   build-nightly:
     jobs:
@@ -139,6 +198,9 @@ jobs:
               .
             rm -rf "$CACHE_DIR" || sudo rm -rf "$CACHE_DIR"
             mv "${CACHE_DIR}.next" "$CACHE_DIR"
+      - security-scan:
+          images: planners-kitchen
+          gitleaks_allow: '.*tests/.*,.*\.html$,frontend/package\.json,mealie/routes/user_routes\.py'
       - run:
           name: Update image tag in GitOps repo
           command: |
