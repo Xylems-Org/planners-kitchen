@@ -118,7 +118,11 @@ ENV TESTING=false
 ARG COMMIT
 ENV GIT_COMMIT_HASH=$COMMIT
 
+# apt-get upgrade patches inherited OS-package CVEs (openssl, gnutls, ffmpeg/libav*)
+# so the shipped image clears the CI trivy CRITICAL gate. Custom fork hardening —
+# re-apply if this Dockerfile is resynced from upstream mealie.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install --no-install-recommends -y \
     curl \
     ffmpeg \
