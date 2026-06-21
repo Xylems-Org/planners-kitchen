@@ -1,0 +1,13 @@
+# .trivyignore — vulnerabilities suppressed for this repo's CI image scan.
+#
+# The CI security gate (gitleaks + trivy, fail-on-CRITICAL) reads this file
+# automatically from the repo root. One vulnerability ID per line; blank lines
+# and lines starting with '#' are ignored. Add an ID here ONLY after reviewing
+# it — e.g. the CVE has no fix yet, or it isn't reachable in how we run the image.
+#
+# Prefer patching over suppressing: most OS CVEs are cleared by the
+# `apt-get upgrade` / `apk upgrade` step already baked into the Dockerfile.
+#
+# The entry below is a placeholder to show the format — CVE-9999-9999 does not
+# exist and matches nothing. Replace or delete it when you add real entries.
+CVE-9999-9999
