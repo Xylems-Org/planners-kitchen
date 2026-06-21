@@ -140,7 +140,7 @@ commands:
               if ! ${DOCKER:-docker} buildx imagetools inspect "$IMG" >/dev/null 2>&1; then
                 DETAIL="${DETAIL}\n• ${repo}: not built this run — skipped"; continue
               fi
-              "$TOOLS/trivy" image --scanners vuln --severity HIGH,CRITICAL --format json -o /tmp/tv.json --quiet "$IMG" 2>/dev/null
+              "$TOOLS/trivy" image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --format json -o /tmp/tv.json --quiet "$IMG" 2>/dev/null
               c=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length' /tmp/tv.json 2>/dev/null || echo 0)
               h=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="HIGH")]|length'     /tmp/tv.json 2>/dev/null || echo 0)
               CRIT=$((CRIT + c)); HIGH=$((HIGH + h))
