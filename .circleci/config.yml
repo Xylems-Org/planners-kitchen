@@ -131,32 +131,36 @@ commands:
             } > /tmp/gl.toml
             "$TOOLS/gitleaks" detect --source . --no-git --config /tmp/gl.toml --report-format json --report-path /tmp/gl.json --exit-code 0 >/dev/null 2>&1
             SECRETS=$(jq 'length' /tmp/gl.json 2>/dev/null || echo 0)
-            # ---- vulns (each built image) ----
+            # ---- vulns (each built image): block on FIXABLE criticals, report unfixable ----
             export TRIVY_CACHE_DIR="$CACHE/trivy"; mkdir -p "$TRIVY_CACHE_DIR"
             export TRIVY_USERNAME="$GHCR_USERNAME"; export TRIVY_PASSWORD="$GHCR_TOKEN"
-            CRIT=0; HIGH=0; DETAIL=""
+            CRIT=0; CRITFIX=0; HIGH=0; DETAIL=""; UNFIX=""
             for repo in << parameters.images >>; do
               IMG="ghcr.io/xylems-org/${repo}:${CIRCLE_SHA1:0:7}"
               if ! ${DOCKER:-docker} buildx imagetools inspect "$IMG" >/dev/null 2>&1; then
                 DETAIL="${DETAIL}\n• ${repo}: not built this run — skipped"; continue
               fi
-              "$TOOLS/trivy" image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --format json -o /tmp/tv.json --quiet "$IMG" 2>/dev/null
-              c=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length' /tmp/tv.json 2>/dev/null || echo 0)
-              h=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="HIGH")]|length'     /tmp/tv.json 2>/dev/null || echo 0)
-              CRIT=$((CRIT + c)); HIGH=$((HIGH + h))
-              DETAIL="${DETAIL}\n• ${repo}: ${c} CRITICAL, ${h} HIGH"
+              "$TOOLS/trivy" image --scanners vuln --severity HIGH,CRITICAL --format json -o /tmp/tv.json --quiet "$IMG" 2>/dev/null
+              c=$(jq  '[.Results[]?.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length' /tmp/tv.json 2>/dev/null || echo 0)
+              cf=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="CRITICAL" and (.FixedVersion//"")!="")]|length' /tmp/tv.json 2>/dev/null || echo 0)
+              h=$(jq  '[.Results[]?.Vulnerabilities[]?|select(.Severity=="HIGH")]|length' /tmp/tv.json 2>/dev/null || echo 0)
+              uf=$(jq -r '[.Results[]?.Vulnerabilities[]?|select(.Severity=="CRITICAL" and (.FixedVersion//"")=="")|.VulnerabilityID]|unique|join(", ")' /tmp/tv.json 2>/dev/null)
+              CRIT=$((CRIT + c)); CRITFIX=$((CRITFIX + cf)); HIGH=$((HIGH + h))
+              DETAIL="${DETAIL}\n• ${repo}: ${c} CRITICAL (${cf} fixable), ${h} HIGH"
+              [ -n "$uf" ] && UNFIX="${UNFIX}\n   ${repo}: ${uf}"
             done
-            # ---- verdict + Slack (always reported) ----
+            # ---- verdict: block on FIXABLE criticals or secrets; unfixable are reported only ----
             FAIL=0; STATUS=":white_check_mark: passed"; COLOR="#22c55e"
-            [ "${CRIT:-0}" -gt 0 ]    && { FAIL=1; STATUS=":x: FAILED — critical vulnerabilities"; COLOR="#ef4444"; }
-            [ "${SECRETS:-0}" -gt 0 ] && { FAIL=1; STATUS=":x: FAILED — secrets detected";        COLOR="#ef4444"; }
+            [ "${CRITFIX:-0}" -gt 0 ] && { FAIL=1; STATUS=":x: FAILED — fixable critical vulnerabilities"; COLOR="#ef4444"; }
+            [ "${SECRETS:-0}" -gt 0 ] && { FAIL=1; STATUS=":x: FAILED — secrets detected";                COLOR="#ef4444"; }
             if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
-              TEXT="*${CIRCLE_PROJECT_REPONAME}* image security scan — ${STATUS}\nSecrets: ${SECRETS}  |  CRITICAL: ${CRIT}  |  HIGH: ${HIGH}${DETAIL}\n<${CIRCLE_BUILD_URL:-}|Build> · \`${CIRCLE_SHA1:0:7}\`"
+              ACCEPTED=""; [ -n "$UNFIX" ] && ACCEPTED="\n:information_source: Accepted unfixable criticals (no upstream patch):${UNFIX}"
+              TEXT="*${CIRCLE_PROJECT_REPONAME}* image security scan — ${STATUS}\nSecrets: ${SECRETS}  |  CRITICAL: ${CRIT} (${CRITFIX} fixable/blocking)  |  HIGH: ${HIGH}${DETAIL}${ACCEPTED}\n<${CIRCLE_BUILD_URL:-}|Build> · \`${CIRCLE_SHA1:0:7}\`"
               payload=$(jq -n --arg t "$TEXT" --arg c "$COLOR" '{attachments:[{color:$c,title:"CI Security Scan",text:$t,mrkdwn_in:["text"]}]}')
               curl -sS -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 || true
             fi
-            echo "RESULT secrets=$SECRETS critical=$CRIT high=$HIGH"
-            [ "$FAIL" -eq 1 ] && { echo "Blocking deploy: critical vulnerabilities or secrets found."; exit 1; }
+            echo "RESULT secrets=$SECRETS critical=$CRIT fixable=$CRITFIX high=$HIGH"
+            [ "$FAIL" -eq 1 ] && { echo "Blocking deploy: fixable critical vulnerabilities or secrets found."; exit 1; }
             exit 0
 
 workflows:
